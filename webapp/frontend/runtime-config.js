@@ -1,3 +1,3 @@
 window.TDR_WEB_CONFIG = {
-  publicApiBase: "https://reverse-bargains-airfare-printing.trycloudflare.com",
+  publicApiBase: "https://workforce-longitude-mixer-tool.trycloudflare.com",
 };
