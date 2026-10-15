@@ -1,7 +1,9 @@
 import os
-
-import h5py
 import numpy as np
+import subprocess
+import sys
+import h5py
+from gwpy.timeseries import TimeSeries
 
 try:
     from .gwosc_utils_snr_mf import _write_temp_segment_hdf5
@@ -9,9 +11,10 @@ except ImportError:
     from gwosc_utils_snr_mf import _write_temp_segment_hdf5
 
 
-class PSDWrapper:
-    """Minimal wrapper used by the PSD plotting function."""
+SCAN_STEP = 32.0
+SCAN_NEG_EXT = 0.0    # GRB scan start; overridable by --scan-start
 
+class PSDWrapper:
     def __init__(self, arr):
         self.sample_frequencies = arr[:, 0]
         self.data = arr[:, 1]
@@ -20,12 +23,35 @@ class PSDWrapper:
         return np.asarray(self.data, dtype=dtype)
 
 
+def _offset_label(off):
+    sign = "m" if off < 0 else "p"
+    value = f"{abs(float(off)):.9f}".rstrip("0").rstrip(".")
+    integer, dot, fraction = value.partition(".")
+    return "scan_t0" + sign + integer.zfill(4) + ("p" + fraction if dot else "")
+
+
+def _build_offsets(scan_end=0.0, scan_start=SCAN_NEG_EXT, scan_step=SCAN_STEP):
+    import math
+    if not all(np.isfinite(x) for x in (scan_start, scan_end, scan_step)):
+        raise ValueError("Scan start, end and step must be finite")
+    if scan_start > scan_end or scan_step <= 0:
+        raise ValueError("Require scan-start <= scan-end and scan-step > 0")
+    first, last = math.ceil(scan_start / scan_step), math.floor(scan_end / scan_step)
+    offsets = sorted(set([float(scan_start), float(scan_end)] +
+                         [float(k * scan_step) for k in range(first, last + 1)]))
+    if len({_offset_label(off) for off in offsets}) != len(offsets):
+        raise ValueError("Scan offsets are too close for the output directory labels")
+    return offsets
+
+
 def compute_psd_from_hdf5(input_hdf5, t0, output_psd, sample_rate):
     """
-    Compute a PSD from a temporary HDF5 strain segment using PyCBC Welch averaging.
+    Read a strain segment from HDF5 and compute the PSD using Welch averaging.
 
-    The input file must contain the dataset ``strain/Strain``. The Welch
-    configuration uses 16 s segments with 8 s overlap.
+    Assumptions:
+    - input_hdf5 contains dataset: strain/Strain
+    - segment length for Welch = 16 s
+    - overlap = 8 s
     """
     import pycbc
     import pycbc.psd
@@ -33,24 +59,40 @@ def compute_psd_from_hdf5(input_hdf5, t0, output_psd, sample_rate):
     with h5py.File(input_hdf5, "r") as f:
         data = f["strain"]["Strain"][:].astype(np.float64)
 
-    ts = pycbc.types.TimeSeries(data, delta_t=1.0 / sample_rate, epoch=t0 - 128)
-    ts *= pycbc.DYN_RANGE_FAC
+    # Construct a GWPy TimeSeries first
+    ts = TimeSeries(data, sample_rate=sample_rate, t0=t0 - 128)
+
+    # Convert to PyCBC TimeSeries
+    pycbc_ts = pycbc.types.TimeSeries(
+        ts.value,
+        delta_t=1.0 / sample_rate,
+        epoch=ts.t0.value
+    )
+
+    # Apply dynamic range factor, same convention as before
+    pycbc_ts *= pycbc.DYN_RANGE_FAC
 
     seg_len = int(16 * sample_rate)
     seg_stride = seg_len // 2
 
-    psd = pycbc.psd.welch(ts, seg_len=seg_len, seg_stride=seg_stride).astype(np.float64)
+    psd = pycbc.psd.welch(
+        pycbc_ts,
+        seg_len=seg_len,
+        seg_stride=seg_stride
+    ).astype(np.float64)
+
     psd /= pycbc.DYN_RANGE_FAC**2
 
-    arr = np.column_stack([
-        np.asarray(psd.sample_frequencies, dtype=np.float64),
-        np.asarray(psd, dtype=np.float64),
-    ])
+    freqs = np.array(psd.sample_frequencies, dtype=np.float64)
+    vals = np.array(psd, dtype=np.float64)
 
+    arr = np.column_stack([freqs, vals])
     arr = arr[np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1])]
-    arr = arr[(arr[:, 0] >= 0) & (arr[:, 1] > 0)]
+    arr = arr[arr[:, 0] >= 0]
+    arr = arr[arr[:, 1] > 0]
 
     np.savetxt(output_psd, arr)
+
     return arr
 
 
@@ -59,13 +101,31 @@ def _make_psd_from_segment(ifo, segment, t_center, outdir):
     psd_path = os.path.join(outdir, f"{ifo.lower()}_psd.txt")
     sample_rate = int(round(segment.sample_rate.value))
 
-    arr = compute_psd_from_hdf5(temp_hdf5, t_center, psd_path, sample_rate)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "targ_ac_git.make_psd_pycbc",
+            "--input-hdf5",
+            temp_hdf5,
+            "--t0",
+            str(t_center),
+            "--output-psd",
+            psd_path,
+            "--sample-rate",
+            str(sample_rate),
+        ],
+        check=True,
+    )
+
+    arr = np.loadtxt(psd_path)
+    arr = arr[arr[:, 1] > 0]
+    np.savetxt(psd_path, arr)
     return PSDWrapper(arr), psd_path, temp_hdf5
 
 
 def _validate_psd_file(psd_path, ifo):
     arr = np.loadtxt(psd_path)
-
     if arr.ndim != 2 or arr.shape[1] != 2:
         raise RuntimeError(f"Bad PSD file format for {ifo}: {psd_path}")
     if not np.all(np.isfinite(arr)):
