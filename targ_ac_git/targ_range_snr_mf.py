@@ -14,11 +14,11 @@ from astropy.time import Time
 try:
     from .aux_snr_mf import compute_antennamap, compute_map, compute_range, map_samples, plot_final, inject, plot_psd
     from .gwosc_utils_snr_mf import GWOSC_SAMPLE_RATE, GWOSCTransientError, GWOSCNoDataError, _get_run_config, _resolve_ifo_config, _load_segment_from_cache
-    from .pipeline_utils_snr_mf import _make_psd_from_segment, _validate_psd_file
+    from .pipeline_utils_snr_mf import _make_psd_from_segment, _validate_psd_file, _build_offsets, _offset_label
 except ImportError:
     from aux_snr_mf import compute_antennamap, compute_map, compute_range, map_samples, plot_final, inject, plot_psd
     from gwosc_utils_snr_mf import GWOSC_SAMPLE_RATE, GWOSCTransientError, GWOSCNoDataError, _get_run_config, _resolve_ifo_config, _load_segment_from_cache
-    from pipeline_utils_snr_mf import _make_psd_from_segment, _validate_psd_file
+    from pipeline_utils_snr_mf import _make_psd_from_segment, _validate_psd_file, _build_offsets, _offset_label
 
 
 EOS_LIST = ["SFHo", "DD2"]
@@ -55,27 +55,14 @@ def parse_snr_type(value):
     raise ValueError("snr_type must be either 'mf' or 'opt'")
 
 
-def parse_iota_ranges(iota_min_deg, iota_max_deg):
-    if iota_min_deg is None and iota_max_deg is None:
-        return [
-            {"label": "0-45", "iota_min": 0.0, "iota_max": np.pi / 4},
-            {"label": "0-90", "iota_min": 0.0, "iota_max": np.pi / 2},
-        ]
-
-    if iota_min_deg is None or iota_max_deg is None:
-        raise ValueError("Please provide both --iota-min and --iota-max, or omit both.")
-
-    iota_min = np.radians(float(iota_min_deg))
-    iota_max = np.radians(float(iota_max_deg))
-
-    if iota_min < 0:
-        raise ValueError("--iota-min must be >= 0 deg")
-    if iota_max > np.pi / 2:
-        raise ValueError("--iota-max must be <= 90 deg")
-    if iota_min >= iota_max:
-        raise ValueError("--iota-min must be smaller than --iota-max")
-
-    return [{"label": f"{iota_min_deg:g}-{iota_max_deg:g}", "iota_min": iota_min, "iota_max": iota_max}]
+def parse_iota_ranges(iota_min_deg=0.0, iota_max_deg=45.0):
+    lo, hi = float(iota_min_deg), float(iota_max_deg)
+    if not (np.isfinite(lo) and np.isfinite(hi) and 0 <= lo < hi <= 90):
+        raise ValueError("Require 0 <= --iota-min < --iota-max <= 90 degrees")
+    ranges = [{"label": f"{lo:g}-{hi:g}", "iota_min": np.radians(lo), "iota_max": np.radians(hi)}]
+    if (lo, hi) != (0.0, 90.0):
+        ranges.append({"label": "0-90", "iota_min": 0.0, "iota_max": np.pi / 2})
+    return ranges
 
 
 def report_ifos_used(output_dir, ifo_status, strain_segments, online_ifos, logger):
@@ -329,7 +316,7 @@ def run_single_trigger(t_center, output_dir, ra, dec, skymap_file, cache_dir, lo
 
     strain_segments, ifo_status = load_strain_segments(run_cfg, t_center, cache_dir, output_dir, logger)
     if not strain_segments:
-        return
+        return {"status": "no_usable_ifos", "online_ifos": []}
 
     logger.info(f"{os.path.basename(output_dir)}: building PSDs for {list(strain_segments.keys())}")
     psd_list, online_ifos, temp_files = build_psds(strain_segments, t_center, output_dir, ifo_status, logger)
@@ -340,7 +327,7 @@ def run_single_trigger(t_center, output_dir, ra, dec, skymap_file, cache_dir, lo
 
     if not online_ifos:
         logger.info(f"{os.path.basename(output_dir)}: no usable detectors after strain+PSD checks")
-        return
+        return {"status": "no_usable_ifos", "online_ifos": []}
 
     logger.info(f"{os.path.basename(output_dir)}: starting plot_psd")
     plot_psd(psd_list, output_dir, ifos=online_ifos)
@@ -371,9 +358,27 @@ def run_single_trigger(t_center, output_dir, ra, dec, skymap_file, cache_dir, lo
         except OSError:
             pass
 
+    from .plot_time_evolution import compute_plot_antenna
+    antenna = compute_plot_antenna(skymap_file, ra, dec, t_center, online_ifos, (ra_max, dec_max))
+    for family in ("bns", "nsbh"):
+        result_file = os.path.join(output_dir, f"results_{family}.json")
+        with open(result_file) as handle:
+            data = json.load(handle)
+        for entry in data[family].values():
+            entry["antenna_factor"] = antenna
+        with open(result_file, "w") as handle:
+            json.dump(data, handle, indent=4)
+    return {"status": "complete", "online_ifos": sorted(online_ifos), "antenna_factor": antenna}
+
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Compute targeted detectability ranges for a single GRB trigger.")
+
+    parser.add_argument("--grb-name", "--name", dest="grb_name", default="GRB", help="GRB name, e.g. GRB200228291. Default: GRB for existing command-line callers.")
+    parser.add_argument("--t90", type=float, default=None, help="Optional T90 metadata in seconds; scan end is independent.")
+    parser.add_argument("--scan-start", type=float, default=0.0, help="Scan start relative to T0, in seconds.")
+    parser.add_argument("--scan-end", type=float, default=0.0, help="Scan end relative to T0, in seconds.")
+    parser.add_argument("--scan-step", "--step-size", dest="scan_step", type=float, default=32.0, help="Scan step in seconds.")
 
     parser.add_argument("--output-dir", required=True, help="Directory where all outputs will be written.")
     parser.add_argument("--t0", required=True, help="Trigger time as GPS seconds or ISO UTC, e.g. 2020-03-26T12:24:47.903.")
@@ -382,8 +387,8 @@ def build_parser():
     parser.add_argument("--dec", type=float, default=None, help="Declination in degrees.")
     parser.add_argument("--skymap-file", type=str, default=None, help="Optional HEALPix sky map FITS file.")
 
-    parser.add_argument("--iota-min", type=float, default=None, help="Minimum inclination angle in degrees.")
-    parser.add_argument("--iota-max", type=float, default=None, help="Maximum inclination angle in degrees.")
+    parser.add_argument("--iota-min", type=float, default=0.0, help="Minimum inclination angle in degrees.")
+    parser.add_argument("--iota-max", type=float, default=45.0, help="Maximum inclination angle in degrees.")
     parser.add_argument("--snr-threshold", type=float, default=9.0, help="SNR threshold used to define D90. Default: 9.")
     parser.add_argument("--snr-type", choices=["mf", "opt"], default="mf",
         help="SNR type used to define the TDR: 'mf' for matched-filter SNR, 'opt' for optimal SNR. Default: mf.",
@@ -398,6 +403,7 @@ def build_parser():
 
 
 def targ_range(args=None):
+    command_line = args is None
     parser = build_parser()
     args = parser.parse_args() if args is None else argparse.Namespace(**args) if isinstance(args, dict) else args
 
@@ -411,18 +417,17 @@ def targ_range(args=None):
         raise ValueError("Please provide either --skymap-file or both --ra and --dec.")
 
     snr_threshold = float(args.snr_threshold)
-    if snr_threshold <= 0:
+    if not np.isfinite(snr_threshold) or snr_threshold <= 0:
         raise ValueError("--snr-threshold must be positive")
 
     snr_type = parse_snr_type(args.snr_type)
     iota_ranges = parse_iota_ranges(args.iota_min, args.iota_max)
 
-    if args.iota_min is None and args.iota_max is None:
-        map_iota_min = 0.0
-        map_iota_max = np.pi / 4
-    else:
-        map_iota_min = np.radians(float(args.iota_min))
-        map_iota_max = np.radians(float(args.iota_max))
+    map_iota_min = np.radians(float(args.iota_min))
+    map_iota_max = np.radians(float(args.iota_max))
+    offsets = _build_offsets(args.scan_end, args.scan_start, args.scan_step)
+    if args.t90 is not None and (not np.isfinite(args.t90) or args.t90 < 0):
+        raise ValueError("--t90 must be finite and nonnegative")
 
     start_time = time.time()
 
@@ -457,18 +462,76 @@ def targ_range(args=None):
     logger.info(f"Using cache_dir={cache_dir}")
     print(f"USING GWOSC CACHE DIR: {cache_dir}", flush=True)
 
-    print("RUNNING SINGLE-TRIGGER ANALYSIS", flush=True)
+    summary = {
+        "grb_name": args.grb_name, "t0": str(args.t0), "t90": args.t90,
+        "scan_start": args.scan_start, "scan_end": args.scan_end, "scan_step": args.scan_step,
+        "snr_threshold": snr_threshold, "snr_type": snr_type,
+        "user_prior": iota_ranges[0]["label"],
+        "iota_min_deg": float(args.iota_min), "iota_max_deg": float(args.iota_max),
+        "skymap_file": args.skymap_file, "bins": [],
+    }
+    print(f"RUNNING {len(offsets)} SCAN BIN(S): {offsets}", flush=True)
+    for offset in offsets:
+        scan_name = _offset_label(offset)
+        bin_dir = os.path.join(args.output_dir, scan_name)
+        os.makedirs(bin_dir, exist_ok=True)
+        row = {"offset_s": offset, "scan_name": scan_name}
+        try:
+            result = run_single_trigger(t0 + offset, bin_dir, args.ra, args.dec, args.skymap_file,
+                                        cache_dir, log_file, iota_ranges, map_iota_min, map_iota_max,
+                                        snr_threshold, snr_type)
+            row.update(result)
+        except Exception as error:
+            print(f"FAILED {scan_name}: {error}", flush=True)
+            with open(os.path.join(bin_dir, "analysis_failed.txt"), "w") as handle:
+                handle.write(str(error) + "\n")
+            row.update(status="failed", online_ifos=None, error=str(error))
+        summary["bins"].append(row)
+        with open(os.path.join(args.output_dir, "scan_summary.json"), "w") as handle:
+            json.dump(summary, handle, indent=4)
 
-    try:
-        run_single_trigger(t0, args.output_dir, args.ra, args.dec, args.skymap_file, cache_dir, log_file, iota_ranges, map_iota_min, map_iota_max, snr_threshold, snr_type)
-    except Exception as e:
-        print(f"FAILED: {e}", flush=True)
-        with open(os.path.join(args.output_dir, "analysis_failed.txt"), "w") as f:
-            f.write(str(e) + "\n")
-        raise
-
+    from .plot_time_evolution import plot_time_evolution
+    plot_time_evolution(args.output_dir)
     elapsed = time.time() - start_time
     print(f"ANALYSIS COMPLETE in {elapsed:.2f} s ({elapsed / 60:.2f} min)", flush=True)
+    failed = [row["scan_name"] for row in summary["bins"] if row["status"] == "failed"]
+    if failed:
+        raise RuntimeError(f"Failed scan bins: {failed}; see their analysis_failed.txt files")
+
+    if not command_line:
+        return summary
+
+
+def run_grb(*, grb_name, t0, output_dir, ra=None, dec=None, skymap_file=None,
+            t90=None, scan_start=0.0, scan_end=0.0, scan_step=32.0,
+            iota_min=0.0, iota_max=45.0, snr_threshold=9.0, snr_type="mf",
+            cache_dir=None):
+    """Analyze one GRB and return the scan summary.
+
+    ``t0`` is an ISO UTC time or GPS seconds. Sky coordinates and inclination
+    limits are in degrees; scan offsets and T90 are in seconds. Localization
+    and output paths can be strings or pathlib.Path objects. The user prior
+    and 0--90-degree prior are saved in the result JSON files. The returned
+    dictionary contains the settings, per-bin status, IFOs and antenna metadata;
+    D90 values are saved under ``output_dir`` in each bin's result JSON files.
+    """
+    return targ_range({
+        "grb_name": grb_name,
+        "t0": t0,
+        "output_dir": os.fspath(output_dir),
+        "ra": ra,
+        "dec": dec,
+        "skymap_file": None if skymap_file is None else os.fspath(skymap_file),
+        "t90": t90,
+        "scan_start": scan_start,
+        "scan_end": scan_end,
+        "scan_step": scan_step,
+        "iota_min": iota_min,
+        "iota_max": iota_max,
+        "snr_threshold": snr_threshold,
+        "snr_type": snr_type,
+        "cache_dir": None if cache_dir is None else os.fspath(cache_dir),
+    })
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ This repository contains a Python pipeline to estimate the Targeted Detectabilit
 
 The pipeline retrieves public gravitational-wave strain data from the Gravitational Wave Open Science Center (GWOSC), estimates the detector power spectral density (PSD), computes compact-binary signal-to-noise ratios (SNRs), and evaluates the distance at which a chosen fraction of simulated sources would be detectable.
 
-The current public version is designed for a single GRB trigger at a time.
+The pipeline analyzes one GRB at a time, either at T0 or across a user-selected time interval. It provides both the installed `tdr` command and a callable Python function, `run_grb()`.
 
 
 OVERVIEW
@@ -31,7 +31,7 @@ and
 
     0 deg < iota < 90 deg
 
-Alternatively, the user can provide a custom inclination interval using --iota-min and --iota-max.
+Use --iota-min and --iota-max for a custom inclination interval. The 0--90-degree prior is always included in the targeted-range PDFs and JSON files. Inclination samples are uniform in cos(iota).
 
 
 INSTALLATION
@@ -222,23 +222,30 @@ OUTPUT FILES
 
 A typical output directory has the structure:
 
+```text
 <output_dir>/
     targ_range.log
-    ifos_used.txt
-    ifos_used.json
+    scan_summary.json
+    <GRB-name>_D90_and_IFO_windows_combined.pdf
     gwosc_cache/
-    inj/
-    results/
-    h1_psd.txt
-    l1_psd.txt
-    v1_psd.txt
-    psd_plot.pdf
-    bns_targeted_range.pdf
-    nsbh_targeted_range.pdf
-    range_map_bns_m1_1.4_m2_1.4.fits
-    range_map_bns_m1_1.4_m2_1.4.pdf
-    results_bns.json
-    results_nsbh.json
+    scan_t0p0000/
+        ifos_used.txt
+        ifos_used.json
+        inj/
+        results/
+        h1_psd.txt
+        l1_psd.txt
+        v1_psd.txt
+        psd_plot.pdf
+        bns_targeted_range.pdf
+        nsbh_targeted_range.pdf
+        range_map_bns_m1_1.4_m2_1.4.fits
+        range_map_bns_m1_1.4_m2_1.4.pdf
+        results_bns.json
+        results_nsbh.json
+```
+
+Each requested scan time has its own bin directory. Detector-specific files exist for the detectors used in that bin. The range map uses the user's inclination bounds and retains all three distance contours. Both targeted-range PDFs and result JSON files include the user's prior and the 0--90-degree prior. The evolution plot shows BNS (1.4, 1.4) and NSBH (10, 1.4) D90 for the user prior with an IFO subplot.
 
 The file:
 
@@ -311,7 +318,7 @@ If --iota-min and --iota-max are omitted, the code evaluates both:
     0 deg < iota < 45 deg
     0 deg < iota < 90 deg
 
-To run only a custom inclination range:
+To compare a custom inclination range with the 0--90-degree prior:
 
     python -m targ_ac_git.targ_range_snr_mf \
         --output-dir GRB_GIT \
@@ -327,6 +334,101 @@ NOTES
 =====
 
 
-The code currently performs a single-trigger analysis. It does not run a time scan, does not use multiprocessing, and does not read a CSV file of GRBs.
+The code analyzes a single GRB, with sequential scan bins and no CPU-count argument or source CSV. The default scan start and end are both zero, so the default analysis runs at T0 only. Detector downloads may run concurrently.
 
 If a sky map is provided with --skymap-file, RA and Dec are not required. If no sky map is provided, both --ra and --dec must be given.
+
+
+PYTHON FUNCTION AND TIME SCANS
+=============================
+
+After installing this version of TDR, call the function from Python or a notebook:
+
+```python
+from targ_ac_git import run_grb
+
+summary = run_grb(
+    grb_name="GRB200228291",
+    t0="2020-02-28T06:58:33.806",
+    output_dir="GRB_runs/GRB200228291",
+    ra=333.89292,
+    dec=-42.944167,
+    t90=3.584,
+    skymap_file="/absolute/path/to/localization.fit",
+    scan_start=-1000,
+    scan_end=3.584,
+)
+```
+
+The function is implemented in `targ_ac_git/targ_range_snr_mf.py` and is also importable from that module. It returns the scan summary dictionary, including bin status, detectors and antenna metadata. D90 values are saved in each bin's `results_bns.json` and `results_nsbh.json`. Failed bins are recorded and cause an exception after the scan.
+
+| Setting | Default |
+| --- | --- |
+| Scan start relative to T0 | 0 s |
+| Scan end relative to T0 | 0 s |
+| Scan step | 32 s |
+| Minimum inclination | 0 degrees |
+| Maximum inclination | 45 degrees |
+| SNR threshold | 9 |
+| SNR type | `mf` |
+
+The same inputs are available through the existing installed command:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+tdr \
+    --grb-name GRB200228291 \
+    --output-dir GRB_runs/GRB200228291 \
+    --t0 2020-02-28T06:58:33.806 \
+    --ra 333.89292 \
+    --dec=-42.944167 \
+    --t90 3.584 \
+    --skymap-file /absolute/path/to/localization.fit \
+    --scan-start=-1000 \
+    --scan-end 3.584 \
+    --scan-step 32 \
+    --iota-min 0 \
+    --iota-max 45 \
+    --snr-threshold 9
+```
+
+The localization FITS file must exist locally. Paths are resolved relative to the current working directory unless absolute paths are provided. `--grb-name` defaults to `GRB` for existing command-line callers such as the web app; the Python function requires a name. Existing command-line flags and the `tdr` entry point remain available. Result files now live in scan-bin subdirectories, including for T0-only runs.
+
+The scan includes its exact endpoints and the T0-anchored step grid within those limits. T0 is included when it lies within the interval. `--t90` is metadata and does not set the scan end. No D90 input is needed.
+
+ANTENNA METADATA
+================
+
+With a localization map, the evolution plot and `antenna_factor.network` in the JSON use the arithmetic mean of the network antenna magnitude over equal-area native HEALPix pixel centers in the map's 90% highest-probability region, including the crossing pixel and boundary ties:
+
+$$
+\overline{F}_{\mathrm{net}} = \frac{1}{N_{90}}\sum_{p\in R_{90}}\sqrt{\sum_d(F_{+,d,p}^2+F_{\times,d,p}^2)}.
+$$
+
+This is an area average, without localization-probability or PSD weighting. Per-detector mean magnitudes are stored as `antenna_factor.per_ifo[ifo].F_mean`. For a fixed position, the plotting factor is evaluated at that source position.
+
+This plotting statistic does not enter D90. The original D90 calculation samples the full localization probability and evaluates per-detector effective distances for the sampled sky positions and orientations. The all-sky injection-reference response is stored separately as `antenna_factor.injection_reference` and is rescaled through the effective-distance ratios.
+
+Recreate the evolution plot from existing output:
+
+```bash
+python -m targ_ac_git.plot_time_evolution --output-dir GRB_runs/GRB200228291
+```
+
+This uses the existing saved antenna metadata; it does not recompute that metadata.
+
+CHECKS
+======
+
+Install `pytest` in the development environment, then run:
+
+```bash
+python -m pytest tests -q
+```
+
+The numerical-function regression check uses source hashes from the supplied baseline. The API tests exercise scan defaults, return values, legacy CLI arguments, failure reporting and the regional mean. The optional waveform test uses synthetic strain with real PyCBC waveforms and PSDs:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+RUN_GRB_INTEGRATION=1 python -m pytest tests/test_grb_integration.py -q
+```

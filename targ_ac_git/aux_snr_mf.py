@@ -14,6 +14,7 @@ import matplotlib
 import numpy as np
 from astropy.io import fits
 from matplotlib.lines import Line2D
+from matplotlib.legend_handler import HandlerLine2D
 from pycbc.detector import Detector
 
 matplotlib.use("Agg")
@@ -45,6 +46,12 @@ DEC_PIX = 90.0 - np.degrees(THETA_PIX)
 
 MASS_COLORS = ["#7fb9d6", "#2a6f97", "#cc7000"]
 PSD_COLORS = ["#0072B2", "#D55E00", "#009E73"]
+
+# Explicit dash sequences are used by BOTH the plotted lines and legend handles.
+SOLID = "solid"
+DASHED = (0, (6, 3))
+DOTTED = (0, (1, 2))
+DASHDOT = (0, (6, 2, 1, 2))
 
 
 def sample_isotropic_iota(iota_min, iota_max, size):
@@ -200,28 +207,28 @@ def _fraction_curve(final_snr_ref, distances, snr_threshold):
 
 def _line_style_and_label(iota_ranges, prior_label, mass_label):
     if len(iota_ranges) == 1:
-        return "-", mass_label
+        return SOLID, mass_label
     if prior_label == iota_ranges[0]["label"]:
-        return "--", None
-    return "-", mass_label
+        return DASHED, None
+    return SOLID, mass_label
 
 
 def _add_tdr_legend(masses_list, iota_ranges):
     mass_handles = [
-        Line2D([0], [0], color=MASS_COLORS[i % len(MASS_COLORS)], lw=2.0, label=f"m1={m1}, m2={m2}")
+        Line2D([0], [0], color=MASS_COLORS[i % len(MASS_COLORS)], lw=2.0, linestyle=SOLID, label=f"m1={m1}, m2={m2}")
         for i, (m1, m2) in enumerate(masses_list)
     ]
 
-    if len(iota_ranges) == 1:
-        handles = mass_handles
-    else:
-        iota_handles = []
-        for i, prior in enumerate(iota_ranges[:2]):
-            iota_max = round(np.degrees(prior["iota_max"]))
-            iota_handles.append(Line2D([0], [0], color="0.6", lw=2.0, linestyle="--" if i == 0 else "-", label=rf"$0 < \iota < {iota_max}^\circ$"))
-        handles = mass_handles + iota_handles
+    iota_handles = []
+    for i, prior in enumerate(iota_ranges):
+        lo, hi = np.degrees([prior["iota_min"], prior["iota_max"]])
+        style = DASHED if len(iota_ranges) > 1 and i == 0 else SOLID
+        iota_handles.append(Line2D([0], [0], color="0.6", lw=2.0, linestyle=style,
+                                   label=rf"${lo:g}^\circ\leq\iota\leq{hi:g}^\circ$"))
+    handles = mass_handles + iota_handles
 
-    leg = pp.legend(handles=handles, fontsize=9, handlelength=3.0, borderpad=0.35, labelspacing=0.35, handletextpad=0.7)
+    leg = pp.legend(handles=handles, fontsize=9, handlelength=3.0, borderpad=0.35, labelspacing=0.35, handletextpad=0.7,
+                    handler_map={Line2D: HandlerLine2D(numpoints=1)}, numpoints=1)
     for line in leg.get_lines():
         line.set_linewidth(2.0)
 
@@ -584,7 +591,7 @@ def plot_final(output_dir, range_map, skymap, samples, iota_min, iota_max):
             skymap_data, _ = ligo.skymap.io.fits.read_sky_map(check_skymap(skymap), nest=True, distances=False)
 
         cls = 100.0 * ligo.skymap.postprocess.util.find_greedy_credible_levels(skymap_data)
-        ax.contour_hpx((cls, "ICRS"), nested=True, colors="black", levels=(50, 90), zorder=3, linestyles=["dashed", "solid"])
+        ax.contour_hpx((cls, "ICRS"), nested=True, colors="black", levels=(50, 90), zorder=3, linestyles=[DASHED, SOLID])
 
     ra_samples = np.degrees(samples[0])
     dec_samples = np.degrees(samples[1])
@@ -595,25 +602,25 @@ def plot_final(output_dir, range_map, skymap, samples, iota_min, iota_max):
     else:
         ax.scatter(ra_samples, dec_samples, marker="x", color="gray", s=0.2, transform=ax.get_transform("icrs"), linewidths=0.2, alpha=1, zorder=1)
         black_handles = [
-            Line2D([0], [0], color="black", linestyle="dashed", linewidth=2.2, label="EXT POS 50%"),
-            Line2D([0], [0], color="black", linestyle="solid", linewidth=2.2, label="EXT POS 90%"),
+            Line2D([0], [0], color="black", linestyle=DASHED, linewidth=2.2, label="EXT POS 50%"),
+            Line2D([0], [0], color="black", linestyle=SOLID, linewidth=2.2, label="EXT POS 90%"),
         ]
 
     vmin, vmax = np.nanmin(hpx), np.nanmax(hpx)
     levels = [round(vmin + (vmax - vmin) / 4, -1), round(vmin + (vmax - vmin) / 2, -1), round(vmin + 3 * (vmax - vmin) / 4, -1)]
 
-    ax.contour_hpx((hpx, "ICRS"), nested=True, colors="#f05adf", levels=levels, zorder=1, linestyles=["dotted", "dashdot", "solid"])
+    ax.contour_hpx((hpx, "ICRS"), nested=True, colors="#f05adf", levels=levels, zorder=1, linestyles=[DOTTED, DASHDOT, SOLID])
     ax.imshow_hpx((hpx, "ICRS"), cmap="GnBu_r", alpha=1.0, nested=True, zorder=0)
 
     red_handles = [
-        Line2D([0], [0], color="#f05adf", linestyle="dotted", linewidth=2, label=f"{int(levels[0])} Mpc"),
-        Line2D([0], [0], color="#f05adf", linestyle="dashdot", linewidth=2, label=f"{int(levels[1])} Mpc"),
-        Line2D([0], [0], color="#f05adf", linestyle="solid", linewidth=2, label=f"{int(levels[2])} Mpc"),
+        Line2D([0], [0], color="#f05adf", linestyle=DOTTED, linewidth=2, label=f"{int(levels[0])} Mpc"),
+        Line2D([0], [0], color="#f05adf", linestyle=DASHDOT, linewidth=2, label=f"{int(levels[1])} Mpc"),
+        Line2D([0], [0], color="#f05adf", linestyle=SOLID, linewidth=2, label=f"{int(levels[2])} Mpc"),
     ]
 
-    red_legend = ax.legend(handles=red_handles, loc="lower left", frameon=True, bbox_to_anchor=(-0.05, -0.22), borderaxespad=0.5, fontsize=9, handlelength=4.0, borderpad=0.4, labelspacing=0.4, handletextpad=0.8)
+    red_legend = ax.legend(handles=red_handles, loc="lower left", frameon=True, bbox_to_anchor=(-0.05, -0.22), borderaxespad=0.5, fontsize=9, handlelength=4.0, borderpad=0.4, labelspacing=0.4, handletextpad=0.8, handler_map={Line2D: HandlerLine2D(numpoints=1)})
     ax.add_artist(red_legend)
-    ax.legend(handles=black_handles, loc="lower right", frameon=True, bbox_to_anchor=(1.05, -0.2), borderaxespad=0.5, fontsize=9, handlelength=4.5, borderpad=0.4, labelspacing=0.4, handletextpad=0.8, numpoints=1)
+    ax.legend(handles=black_handles, loc="lower right", frameon=True, bbox_to_anchor=(1.05, -0.2), borderaxespad=0.5, fontsize=9, handlelength=4.5, borderpad=0.4, labelspacing=0.4, handletextpad=0.8, numpoints=1, handler_map={Line2D: HandlerLine2D(numpoints=1)})
 
     sm = pp.cm.ScalarMappable(cmap=pp.cm.GnBu_r, norm=pp.Normalize(vmin=vmin, vmax=vmax))
     cbar = pp.colorbar(sm, ax=ax, shrink=1.0, orientation="horizontal", aspect=30)
@@ -626,7 +633,7 @@ def plot_final(output_dir, range_map, skymap, samples, iota_min, iota_max):
     parts = os.path.basename(range_map).replace(".fits", "").split("_")
     cbc_type, m1, m2 = parts[2], parts[4], parts[6]
     title = f"{cbc_type.upper()} ({m1} + {m2}) $M_{{\\odot}}$"
-    title += rf", ${round(np.degrees(iota_min))}^\circ < \iota < {round(np.degrees(iota_max))}^\circ$"
+    title += rf", ${np.degrees(iota_min):g}^\circ\leq\iota\leq{np.degrees(iota_max):g}^\circ$"
     ax.set_title(title, fontsize=15)
 
     pp.tight_layout()

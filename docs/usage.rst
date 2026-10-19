@@ -56,6 +56,13 @@ Command options
 - ``--iota-min`` and ``--iota-max``: custom inclination prior in degrees
 - ``--snr-threshold``: detection threshold used for D90 (default: 9)
 - ``--snr-type``: ``mf`` (matched-filter-like) or ``opt`` (optimal)
+- ``--grb-name``: name for metadata and the combined plot (default: ``GRB``)
+- ``--t90``: optional metadata in seconds; does not set the scan end
+- ``--scan-start`` and ``--scan-end``: offsets from T0 in seconds (default: 0)
+- ``--scan-step``: scan step in seconds (default: 32)
+
+The inclination defaults are 0--45 degrees. The 0--90-degree prior is always
+saved alongside a custom prior. Scan bins are processed sequentially.
 
 
 Output overview
@@ -67,15 +74,43 @@ Typical output tree:
 
    <output-dir>/
    |-- targ_range.log
-   |-- ifos_used.txt
-   |-- ifos_used.json
+   |-- scan_summary.json
+   |-- <GRB-name>_D90_and_IFO_windows_combined.pdf
    |-- gwosc_cache/
-   |-- inj/
-   |-- results/
-   |-- psd_plot.pdf
-   |-- bns_targeted_range.pdf
-   |-- nsbh_targeted_range.pdf
-   |-- results_bns.json
-   |-- results_nsbh.json
-   |-- range_map_bns_m1_1.4_m2_1.4.fits
-   `-- range_map_bns_m1_1.4_m2_1.4.pdf
+   `-- scan_t0p0000/
+       |-- ifos_used.txt
+       |-- ifos_used.json
+       |-- inj/
+       |-- results/
+       |-- psd_plot.pdf
+       |-- bns_targeted_range.pdf
+       |-- nsbh_targeted_range.pdf
+       |-- results_bns.json
+       |-- results_nsbh.json
+       |-- range_map_bns_m1_1.4_m2_1.4.fits
+       `-- range_map_bns_m1_1.4_m2_1.4.pdf
+
+Each requested scan time gets its own directory. The combined plot uses the
+mean network antenna magnitude over the map's 90% credible region for its
+colors. This area average is metadata and does not enter the D90 calculation.
+D90 retains full-map probability-weighted sky sampling.
+
+Python function
+---------------
+
+.. code-block:: python
+
+   from targ_ac_git import run_grb
+
+   summary = run_grb(
+       grb_name="GRB200228291",
+       t0="2020-02-28T06:58:33.806",
+       output_dir="GRB_runs/GRB200228291",
+       ra=333.89292,
+       dec=-42.944167,
+       scan_start=-1000,
+       scan_end=3.584,
+   )
+
+The function returns scan settings, bin status, IFOs and antenna metadata.
+The D90 values are saved in the per-bin result JSON files.
